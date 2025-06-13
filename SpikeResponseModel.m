@@ -1,4 +1,4 @@
-classdef SpikeResponseModel
+classdef SpikeResponseModel<handle
     % SpikeResponseModel
     % Object-oriented framework for simulating, optimizing, and analyzing
     % spike generation using dynamic threshold models

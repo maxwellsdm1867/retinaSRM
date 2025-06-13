@@ -1,6 +1,7 @@
 %% Real Experimental Data Analysis with Dynamic Exponential Threshold - simulateFast ONLY
 % Complete workflow for analyzing real patch-clamp data using SpikeResponseModel
 % Modified to use ONLY simulateFast for all simulations
+% NOW WITH HOLD-OUT VALIDATION
 % Assumes: Vm_all (raw data), Vm_cleaned (spike-removed data) are loaded
 
 fprintf('=== REAL EXPERIMENTAL DATA ANALYSIS (simulateFast ONLY) ===\n');
@@ -15,8 +16,8 @@ if ~exist('Vm_all', 'var') || ~exist('Vm_cleaned', 'var')
 end
 
 % Check for your spike detection function
-if ~exist('detect_spike_initiation_elbow', 'file')
-    error(['Please ensure detect_spike_initiation_elbow.m is in your MATLAB path.\n' ...
+if ~exist('detect_spike_initiation_elbow_v2', 'file')
+    error(['Please ensure detect_spike_initiation_elbow_v2.m is in your MATLAB path.\n' ...
            'This function is required for spike detection.']);
 end
 
@@ -42,12 +43,53 @@ fprintf('  Data points: %d samples\n', length(Vm_all));
 fprintf('  Voltage range (raw): %.1f to %.1f mV\n', min(Vm_all), max(Vm_all));
 fprintf('  Voltage range (cleaned): %.1f to %.1f mV\n', min(Vm_cleaned), max(Vm_cleaned));
 
-%% === SPIKE DETECTION USING YOUR ELBOW FUNCTION ===
-fprintf('\n=== SPIKE DETECTION ===\n');
+%% === HOLD-OUT VALIDATION SETUP ===
+fprintf('\n=== HOLD-OUT VALIDATION SETUP ===\n');
+
+% Hold-out parameters
+holdout_duration_sec = 30;  % Fixed 30-second hold-out for fair comparison
+holdout_samples = round(holdout_duration_sec / dt);
+
+% Check if hold-out is possible
+if holdout_samples >= length(Vm_all)
+    warning('Hold-out duration (%.1fs) >= total recording (%.1fs)! Using 70%% of data for hold-out.', ...
+        holdout_duration_sec, t_total);
+    holdout_samples = round(0.3 * length(Vm_all));  % Use 30% as hold-out
+    holdout_duration_sec = holdout_samples * dt;
+end
+
+% Calculate split indices
+train_end_idx = length(Vm_all) - holdout_samples;
+holdout_start_idx = train_end_idx + 1;
+
+% Split data
+Vm_all_train = Vm_all(1:train_end_idx);
+Vm_cleaned_train = Vm_cleaned(1:train_end_idx);
+Vm_all_holdout = Vm_all(holdout_start_idx:end);
+Vm_cleaned_holdout = Vm_cleaned(holdout_start_idx:end);
+
+% Calculate durations and percentages
+train_duration = train_end_idx * dt;
+holdout_percentage = (holdout_duration_sec / t_total) * 100;
+train_percentage = (train_duration / t_total) * 100;
+
+fprintf('Data split configuration:\n');
+fprintf('  Total duration: %.2f s\n', t_total);
+fprintf('  Training set: %.2f s (%.1f%% of total)\n', train_duration, train_percentage);
+fprintf('  Hold-out set: %.2f s (%.1f%% of total)\n', holdout_duration_sec, holdout_percentage);
+fprintf('  Training samples: %d\n', length(Vm_all_train));
+fprintf('  Hold-out samples: %d\n', length(Vm_all_holdout));
+
+if holdout_percentage < 20
+    warning('Hold-out set is only %.1f%% of total data. Consider longer recordings for robust validation.', holdout_percentage);
+end
+
+%% === SPIKE DETECTION USING YOUR ELBOW FUNCTION (TRAINING SET ONLY) ===
+fprintf('\n=== SPIKE DETECTION (TRAINING SET) ===\n');
 
 % Parameters for your elbow detection function
 vm_thresh = -20;        % Voltage threshold for peak detection (mV)
-d2v_thresh = 10;        % Second derivative threshold for elbow detection
+d2v_thresh = 50;        % Second derivative threshold for elbow detection
 search_back_ms = 2;     % Search back window in ms
 plot_flag = true;       % Show detection plots
 
@@ -56,76 +98,48 @@ fprintf('  Voltage threshold: %.1f mV\n', vm_thresh);
 fprintf('  d²V/dt² threshold: %.1f mV/ms²\n', d2v_thresh);
 fprintf('  Search back window: %.1f ms\n', search_back_ms);
 
-% Run your spike detection function
-[elbow_indices, spike_peaks, isi, avg_spike] = detect_spike_initiation_elbow(...
-    Vm_all, dt, vm_thresh, d2v_thresh, search_back_ms, plot_flag);
+% Run spike detection on TRAINING set only
+[elbow_indices_train, spike_peaks_train, isi_train, avg_spike, diagnostic_info] = ...
+    detect_spike_initiation_elbow_v2(Vm_all_train, dt, vm_thresh, d2v_thresh, search_back_ms, plot_flag, ...
+    'elbow_thresh', -65, 'spike_thresh', -10, 'min_dv_thresh', 0.1, 'time_to_peak_thresh', 1.5);
 
 % Calculate threshold values at spike initiation points
-if isempty(elbow_indices)
-    error('No spikes detected! Try adjusting detection parameters:\n - Lower vm_thresh\n - Lower d2v_thresh\n - Increase search_back_ms');
+if isempty(elbow_indices_train)
+    error('No spikes detected in training set! Try adjusting detection parameters:\n - Lower vm_thresh\n - Lower d2v_thresh\n - Increase search_back_ms');
 end
 
-threshold_values = Vm_all(elbow_indices);  % Voltage at spike initiation
+threshold_values_train = Vm_all_train(elbow_indices_train);  % Voltage at spike initiation
 
-fprintf('\nSpike detection results:\n');
-fprintf('  Detected elbow points: %d\n', length(elbow_indices));
-fprintf('  Detected spike peaks: %d\n', length(spike_peaks));
-fprintf('  Average firing rate: %.2f Hz\n', length(elbow_indices)/t_total);
-fprintf('  Threshold range: %.1f to %.1f mV\n', min(threshold_values), max(threshold_values));
-fprintf('  Mean threshold: %.1f ± %.1f mV\n', mean(threshold_values), std(threshold_values));
+fprintf('\nSpike detection results (TRAINING SET):\n');
+fprintf('  Detected elbow points: %d\n', length(elbow_indices_train));
+fprintf('  Average firing rate: %.2f Hz\n', length(elbow_indices_train)/train_duration);
+fprintf('  Threshold range: %.1f to %.1f mV\n', min(threshold_values_train), max(threshold_values_train));
+fprintf('  Mean threshold: %.1f ± %.1f mV\n', mean(threshold_values_train), std(threshold_values_train));
 
-if ~isempty(isi)
-    fprintf('  Mean ISI: %.1f ± %.1f ms\n', mean(isi), std(isi));
-    fprintf('  ISI range: %.1f to %.1f ms\n', min(isi), max(isi));
+if ~isempty(isi_train)
+    fprintf('  Mean ISI: %.1f ± %.1f ms\n', mean(isi_train), std(isi_train));
+    fprintf('  ISI range: %.1f to %.1f ms\n', min(isi_train), max(isi_train));
 end
 
-%% === SPIKE SHAPE ANALYSIS ===
-fprintf('\n=== SPIKE SHAPE ANALYSIS ===\n');
+%% === SPIKE DETECTION ON HOLD-OUT SET (FOR VALIDATION) ===
+fprintf('\n=== SPIKE DETECTION (HOLD-OUT SET) ===\n');
 
-% The detection function provides avg_spike - use it directly
-fprintf('Spike shape analysis (from detect_spike_initiation_elbow):\n');
-fprintf('  Average spike calculated from %d spikes\n', length(elbow_indices));
+% Run spike detection on HOLD-OUT set using same parameters
+[elbow_indices_holdout, ~, isi_holdout, ~, ~] = ...
+    detect_spike_initiation_elbow_v2(Vm_all_holdout, dt, vm_thresh, d2v_thresh, search_back_ms, false, ...
+    'elbow_thresh', -65, 'spike_thresh', -10, 'min_dv_thresh', 0.1, 'time_to_peak_thresh', 1.5);
 
-% Validate that avg_spike was properly returned
-if isempty(avg_spike) || length(avg_spike) < 2
-    fprintf('  Warning: avg_spike not properly returned from detection function\n');
-    % Create a simple spike template as fallback
-    spike_duration_ms = 2;  % 2 ms spike
-    spike_samples = round(spike_duration_ms / 1000 / dt);
-    t_spike = (0:spike_samples-1) * dt * 1000;
-    avg_spike = 20 * exp(-t_spike / 0.5);  % Simple exponential decay
-    fprintf('  Using fallback spike template: %d samples\n', length(avg_spike));
-else
-    % Use the avg_spike returned by the detection function
-    fprintf('  Spike waveform length: %d samples (%.1f ms)\n', length(avg_spike), length(avg_spike)*dt*1000);
-    
-    spike_amplitude = max(avg_spike) - min(avg_spike);
-    fprintf('  Average spike amplitude: %.1f mV\n', spike_amplitude);
-    
-    % Find peak and half-width
-    [peak_val, peak_idx] = max(avg_spike);
-    trough_val = min(avg_spike);
-    half_max = trough_val + (peak_val - trough_val) / 2;
-    
-    % Find half-width points
-    pre_peak = avg_spike(1:peak_idx);
-    post_peak = avg_spike(peak_idx:end);
-    
-    pre_half_idx = find(pre_peak <= half_max, 1, 'last');
-    post_half_idx = find(post_peak <= half_max, 1, 'first');
-    
-    if ~isempty(pre_half_idx) && ~isempty(post_half_idx)
-        half_width_samples = (post_half_idx + peak_idx - 1) - pre_half_idx;
-        half_width_ms = half_width_samples * dt * 1000;
-        fprintf('  Spike half-width: %.2f ms\n', half_width_ms);
-    end
-    
-    fprintf('  Peak amplitude: %.1f mV\n', peak_val);
-    fprintf('  Trough amplitude: %.1f mV\n', trough_val);
+threshold_values_holdout = Vm_all_holdout(elbow_indices_holdout);
+
+fprintf('Hold-out set spike detection:\n');
+fprintf('  Detected spikes: %d\n', length(elbow_indices_holdout));
+fprintf('  Firing rate: %.2f Hz\n', length(elbow_indices_holdout)/holdout_duration_sec);
+if ~isempty(threshold_values_holdout)
+    fprintf('  Mean threshold: %.1f ± %.1f mV\n', mean(threshold_values_holdout), std(threshold_values_holdout));
 end
 
-%% === CREATE SPIKERESPONSEMODEL OBJECT ===
-fprintf('\n=== CREATING SPIKERESPONSEMODEL ===\n');
+%% === CREATE SPIKERESPONSEMODEL OBJECT (TRAINING DATA) ===
+fprintf('\n=== CREATING SPIKERESPONSEMODEL (TRAINING DATA) ===\n');
 
 % Set refractory period
 tau_ref_ms = 2.0;  % 2 ms absolute refractory period
@@ -143,35 +157,31 @@ else
     cell_type_name = 'Unknown';
 end
 
-% Create the model
+% Create the model using TRAINING data only
 model = SpikeResponseModel( ...
-    Vm_cleaned, ...          % Subthreshold voltage trace
-    Vm_all, ...              % Raw voltage trace
-    dt, ...                  % Time step
-    avg_spike, ...           % Average spike waveform
-    tau_ref_ms, ...          % Refractory period
-    elbow_indices, ...       % Spike initiation indices
-    threshold_values, ...    % Threshold values at spikes
-    cell_name, ...           % Cell identifier
-    cell_type_name ...       % Cell type
+    Vm_cleaned_train, ...          % Subthreshold voltage trace (training)
+    Vm_all_train, ...              % Raw voltage trace (training)
+    dt, ...                        % Time step
+    avg_spike, ...                 % Average spike waveform
+    tau_ref_ms, ...                % Refractory period
+    elbow_indices_train, ...       % Spike initiation indices (training)
+    threshold_values_train, ...    % Threshold values at spikes (training)
+    cell_name, ...                 % Cell identifier
+    cell_type_name ...             % Cell type
 );
 
-fprintf('SpikeResponseModel created successfully:\n');
+fprintf('SpikeResponseModel created successfully (TRAINING DATA):\n');
 fprintf('  Cell ID: %s\n', cell_name);
 fprintf('  Cell type: %s\n', cell_type_name);
-fprintf('  Spikes: %d\n', length(elbow_indices));
+fprintf('  Training spikes: %d\n', length(elbow_indices_train));
+fprintf('  Training duration: %.2f s\n', train_duration);
 
-%% === PARAMETER OPTIMIZATION - EXPONENTIAL KERNEL ===
-fprintf('\n=== EXPONENTIAL THRESHOLD OPTIMIZATION WITH SIMULATEFAST ===\n');
-
-% Define parameter search ranges based on literature (Jolivet et al., 2006)
-% theta0: baseline threshold (typically -62 to -38 mV)
-% A: adaptation amplitude (typically 2 to 12 mV) 
-% tau: adaptation time constant (typically 15 to 71 ms)
+%% === PARAMETER OPTIMIZATION - EXPONENTIAL KERNEL (TRAINING DATA) ===
+fprintf('\n=== EXPONENTIAL THRESHOLD OPTIMIZATION WITH SIMULATEFAST (TRAINING) ===\n');
 
 % Initial parameter estimates for exponential kernel
-theta0_range = [min(threshold_values)-10, max(threshold_values)+5];
-theta0_init = mean(threshold_values) - 2;  % Start slightly below mean threshold
+theta0_range = [min(threshold_values_train)-10, max(threshold_values_train)+5];
+theta0_init = mean(threshold_values_train) - 2;  % Start slightly below mean threshold
 
 A_range = [1, 15];  % mV
 A_init = 5;         % Start with moderate adaptation
@@ -181,7 +191,7 @@ tau_init = 0.03;           % Start with 30 ms
 
 init_params_exp = [theta0_init, A_init, tau_init];
 
-fprintf('Exponential kernel optimization setup:\n');
+fprintf('Exponential kernel optimization setup (TRAINING):\n');
 fprintf('  Initial θ₀: %.1f mV (range: %.1f to %.1f mV)\n', theta0_init, theta0_range);
 fprintf('  Initial A:  %.1f mV (range: %.1f to %.1f mV)\n', A_init, A_range);
 fprintf('  Initial τ:  %.1f ms (range: %.1f to %.1f ms)\n', tau_init*1000, tau_range*1000);
@@ -190,7 +200,7 @@ fprintf('  Initial τ:  %.1f ms (range: %.1f to %.1f ms)\n', tau_init*1000, tau_
 vp_q = 4;  % Standard value for spike timing precision
 
 % Define FAST optimization objective using simulateFast ONLY
-fprintf('\nOptimizing EXPONENTIAL kernel using simulateFast...\n');
+fprintf('\nOptimizing EXPONENTIAL kernel using simulateFast (TRAINING DATA)...\n');
 
 % Fast loss function for exponential kernel
 fast_loss_exp_fn = @(params) compute_fast_vp_loss_exponential(params, model, vp_q);
@@ -203,7 +213,7 @@ fprintf('Using fminsearch with simulateFast for exponential kernel...\n');
 
 % Run optimization with fminsearch - EXPONENTIAL
 tic;
-[opt_params_exp, final_vp_exp] = fminsearch(fast_loss_exp_fn, init_params_exp, options);
+[opt_params_exp, final_vp_exp_train] = fminsearch(fast_loss_exp_fn, init_params_exp, options);
 opt_time_exp = toc;
 
 % Extract optimized parameters - exponential
@@ -211,21 +221,16 @@ theta0_opt_exp = opt_params_exp(1);
 A_opt_exp = opt_params_exp(2);
 tau_opt_exp = opt_params_exp(3);
 
-fprintf('\n=== EXPONENTIAL KERNEL RESULTS ===\n');
+fprintf('\n=== EXPONENTIAL KERNEL RESULTS (TRAINING) ===\n');
 fprintf('Optimization completed in %.1f seconds\n', opt_time_exp);
 fprintf('Initial params: θ₀=%.1f, A=%.1f, τ=%.1f ms\n', init_params_exp(1), init_params_exp(2), init_params_exp(3)*1000);
 fprintf('Optimized params: θ₀=%.1f, A=%.1f, τ=%.1f ms\n', theta0_opt_exp, A_opt_exp, tau_opt_exp*1000);
-fprintf('Final VP distance: %.3f\n', final_vp_exp);
+fprintf('Final VP distance (TRAINING): %.3f\n', final_vp_exp_train);
 
-%% === PARAMETER OPTIMIZATION - LINEAR RISE + EXPONENTIAL DECAY KERNEL ===
-fprintf('\n=== LINEAR RISE + EXPONENTIAL DECAY OPTIMIZATION ===\n');
+%% === PARAMETER OPTIMIZATION - LINEAR RISE + EXPONENTIAL DECAY KERNEL (TRAINING) ===
+fprintf('\n=== LINEAR RISE + EXPONENTIAL DECAY OPTIMIZATION (TRAINING) ===\n');
 
 % Initial parameter estimates for linear rise + exp decay kernel
-% theta0: baseline threshold (same as before)
-% A: adaptation amplitude (same range)
-% T_rise: rise time constant (typically 1-10 ms)
-% tau_decay: decay time constant (typically 15-71 ms)
-
 T_rise_range = [0.001, 0.01];  % 1-10 ms
 T_rise_init = 0.003;           % Start with 3 ms
 
@@ -234,7 +239,7 @@ tau_decay_init = 0.04;         % Start with 40 ms
 
 init_params_linexp = [theta0_init, A_init, T_rise_init, tau_decay_init];
 
-fprintf('Linear rise + exponential decay kernel optimization setup:\n');
+fprintf('Linear rise + exponential decay kernel optimization setup (TRAINING):\n');
 fprintf('  Initial θ₀: %.1f mV\n', theta0_init);
 fprintf('  Initial A:  %.1f mV\n', A_init);
 fprintf('  Initial T_rise: %.1f ms (range: %.1f to %.1f ms)\n', T_rise_init*1000, T_rise_range*1000);
@@ -243,11 +248,11 @@ fprintf('  Initial τ_decay: %.1f ms (range: %.1f to %.1f ms)\n', tau_decay_init
 % Define optimization objective for linear rise + exp decay
 fast_loss_linexp_fn = @(params) compute_fast_vp_loss_linexp(params, model, vp_q);
 
-fprintf('\nOptimizing LINEAR RISE + EXP DECAY kernel using simulateFast...\n');
+fprintf('\nOptimizing LINEAR RISE + EXP DECAY kernel using simulateFast (TRAINING)...\n');
 
 % Run optimization - LINEAR RISE + EXP DECAY
 tic;
-[opt_params_linexp, final_vp_linexp] = fminsearch(fast_loss_linexp_fn, init_params_linexp, options);
+[opt_params_linexp, final_vp_linexp_train] = fminsearch(fast_loss_linexp_fn, init_params_linexp, options);
 opt_time_linexp = toc;
 
 % Extract optimized parameters - linear rise + exp decay
@@ -256,115 +261,134 @@ A_opt_linexp = opt_params_linexp(2);
 T_rise_opt_linexp = opt_params_linexp(3);
 tau_decay_opt_linexp = opt_params_linexp(4);
 
-fprintf('\n=== LINEAR RISE + EXP DECAY RESULTS ===\n');
+fprintf('\n=== LINEAR RISE + EXP DECAY RESULTS (TRAINING) ===\n');
 fprintf('Optimization completed in %.1f seconds\n', opt_time_linexp);
-fprintf('Initial params: θ₀=%.1f, A=%.1f, T_rise=%.1f ms, τ_decay=%.1f ms\n', ...
-    init_params_linexp(1), init_params_linexp(2), init_params_linexp(3)*1000, init_params_linexp(4)*1000);
 fprintf('Optimized params: θ₀=%.1f, A=%.1f, T_rise=%.1f ms, τ_decay=%.1f ms\n', ...
     theta0_opt_linexp, A_opt_linexp, T_rise_opt_linexp*1000, tau_decay_opt_linexp*1000);
-fprintf('Final VP distance: %.3f\n', final_vp_linexp);
+fprintf('Final VP distance (TRAINING): %.3f\n', final_vp_linexp_train);
 
-%% === COMPARE KERNELS AND SELECT BEST ===
-fprintf('\n=== KERNEL COMPARISON ===\n');
-fprintf('Exponential kernel VP distance: %.3f\n', final_vp_exp);
-fprintf('Linear rise + exp decay VP distance: %.3f\n', final_vp_linexp);
+%% === HOLD-OUT VALIDATION FOR BOTH KERNELS ===
+fprintf('\n=== HOLD-OUT VALIDATION ===\n');
 
-if final_vp_exp < final_vp_linexp
-    fprintf('🏆 EXPONENTIAL kernel performs better (lower VP distance)\n');
+% Create hold-out model for validation
+model_holdout = SpikeResponseModel( ...
+    Vm_cleaned_holdout, ...        % Hold-out subthreshold data
+    Vm_all_holdout, ...            % Hold-out raw data
+    dt, ...                        % Time step
+    avg_spike, ...                 % Same spike waveform
+    tau_ref_ms, ...                % Same refractory period
+    elbow_indices_holdout, ...     % Hold-out spike indices
+    threshold_values_holdout, ...  % Hold-out thresholds
+    cell_name, ...                 % Cell identifier
+    cell_type_name ...             % Cell type
+);
+
+% Test EXPONENTIAL kernel on hold-out data
+fprintf('Testing EXPONENTIAL kernel on hold-out data...\n');
+kernel_exp = @(t) A_opt_exp * exp(-t / tau_opt_exp);
+fast_loss_exp_holdout_fn = @(params) compute_fast_vp_loss_exponential(params, model_holdout, vp_q);
+final_vp_exp_holdout = fast_loss_exp_holdout_fn(opt_params_exp);
+
+% Test LINEAR RISE + EXP DECAY kernel on hold-out data
+fprintf('Testing LINEAR RISE + EXP DECAY kernel on hold-out data...\n');
+fast_loss_linexp_holdout_fn = @(params) compute_fast_vp_loss_linexp(params, model_holdout, vp_q);
+final_vp_linexp_holdout = fast_loss_linexp_holdout_fn(opt_params_linexp);
+
+%% === HOLD-OUT RESULTS COMPARISON ===
+fprintf('\n=== HOLD-OUT VALIDATION RESULTS ===\n');
+fprintf('EXPONENTIAL kernel:\n');
+fprintf('  Training VP: %.3f\n', final_vp_exp_train);
+fprintf('  Hold-out VP: %.3f\n', final_vp_exp_holdout);
+fprintf('  Generalization ratio: %.3f (lower is better)\n', final_vp_exp_holdout / final_vp_exp_train);
+
+fprintf('\nLINEAR RISE + EXP DECAY kernel:\n');
+fprintf('  Training VP: %.3f\n', final_vp_linexp_train);
+fprintf('  Hold-out VP: %.3f\n', final_vp_linexp_holdout);
+fprintf('  Generalization ratio: %.3f (lower is better)\n', final_vp_linexp_holdout / final_vp_linexp_train);
+
+% Select best model based on HOLD-OUT performance
+if final_vp_exp_holdout < final_vp_linexp_holdout
+    fprintf('\n🏆 EXPONENTIAL kernel performs better on HOLD-OUT data\n');
     best_kernel = 'exponential';
     theta0_opt = theta0_opt_exp;
     A_opt = A_opt_exp;
     tau_opt = tau_opt_exp;
-    final_vp = final_vp_exp;
-    opt_time = opt_time_exp;
+    final_vp_train = final_vp_exp_train;
+    final_vp_holdout = final_vp_exp_holdout;
     opt_params = opt_params_exp;
     kernel_opt = @(t) A_opt * exp(-t / tau_opt);
     kernel_params = [A_opt, tau_opt];
 else
-    fprintf('🏆 LINEAR RISE + EXP DECAY kernel performs better (lower VP distance)\n');
+    fprintf('\n🏆 LINEAR RISE + EXP DECAY kernel performs better on HOLD-OUT data\n');
     best_kernel = 'linear_rise_exp_decay';
     theta0_opt = theta0_opt_linexp;
     A_opt = A_opt_linexp;
     T_rise_opt = T_rise_opt_linexp;
     tau_decay_opt = tau_decay_opt_linexp;
-    final_vp = final_vp_linexp;
-    opt_time = opt_time_linexp;
+    final_vp_train = final_vp_linexp_train;
+    final_vp_holdout = final_vp_linexp_holdout;
     opt_params = opt_params_linexp;
-    % Correct piecewise kernel function handle
     kernel_opt = @(t) (t < T_rise_opt) .* (A_opt / T_rise_opt .* t) + ...
                       (t >= T_rise_opt) .* (A_opt * exp(-(t - T_rise_opt) / tau_decay_opt));
     kernel_params = [A_opt, T_rise_opt, tau_decay_opt];
 end
 
-improvement_pct = abs(final_vp_exp - final_vp_linexp) / max(final_vp_exp, final_vp_linexp) * 100;
-fprintf('Performance improvement: %.1f%%\n', improvement_pct);
+holdout_improvement_pct = abs(final_vp_exp_holdout - final_vp_linexp_holdout) / max(final_vp_exp_holdout, final_vp_linexp_holdout) * 100;
+fprintf('Hold-out performance improvement: %.1f%%\n', holdout_improvement_pct);
 
-%% === VALIDATION AND SIMULATION FOR BOTH KERNELS ===
-fprintf('\n=== VALIDATION FOR BOTH KERNELS ===\n');
-
-% Run simulation with EXPONENTIAL kernel using simulateFast
-fprintf('Running validation with EXPONENTIAL kernel using simulateFast...\n');
-kernel_exp = @(t) A_opt_exp * exp(-t / tau_opt_exp);
-[spikes_exp, V_pred_exp, threshold_trace_exp, spike_times_exp, spike_V_exp] = ...
-    model.simulateFast(theta0_opt_exp, kernel_exp, 'profile', false);
-
-% Run simulation with LINEAR RISE + EXP DECAY kernel using simulateFast  
-fprintf('Running validation with LINEAR RISE + EXP DECAY kernel using simulateFast...\n');
-kernel_linexp = @(t) (t < T_rise_opt_linexp) .* (A_opt_linexp / T_rise_opt_linexp .* t) + ...
-                     (t >= T_rise_opt_linexp) .* (A_opt_linexp * exp(-(t - T_rise_opt_linexp) / tau_decay_opt_linexp));
-[spikes_linexp, V_pred_linexp, threshold_trace_linexp, spike_times_linexp, spike_V_linexp] = ...
-    model.simulateFast(theta0_opt_linexp, kernel_linexp, 'profile', false);
-
-% Calculate performance metrics for both kernels
-n_true_spikes = length(elbow_indices);
-true_rate = n_true_spikes / t_total;
-
-% Exponential kernel metrics
-n_pred_spikes_exp = length(spike_times_exp);
-pred_rate_exp = n_pred_spikes_exp / t_total;
-rate_accuracy_exp = 100 * min(pred_rate_exp, true_rate) / max(pred_rate_exp, true_rate);
-
-% Linear rise + exp decay kernel metrics
-n_pred_spikes_linexp = length(spike_times_linexp);
-pred_rate_linexp = n_pred_spikes_linexp / t_total;
-rate_accuracy_linexp = 100 * min(pred_rate_linexp, true_rate) / max(pred_rate_linexp, true_rate);
-
-fprintf('\nValidation results:\n');
-fprintf('  True spikes: %d (%.2f Hz)\n', n_true_spikes, true_rate);
-fprintf('  EXPONENTIAL: %d spikes (%.2f Hz, %.1f%% accuracy, VP=%.3f)\n', ...
-    n_pred_spikes_exp, pred_rate_exp, rate_accuracy_exp, final_vp_exp);
-fprintf('  LINEAR+EXP: %d spikes (%.2f Hz, %.1f%% accuracy, VP=%.3f)\n', ...
-    n_pred_spikes_linexp, pred_rate_linexp, rate_accuracy_linexp, final_vp_linexp);
-
-% Set which kernel results to use for the final performance testing
-if strcmp(best_kernel, 'exponential')
-    spikes_opt = spikes_exp;
-    V_pred_opt = V_pred_exp;
-    threshold_trace_opt = threshold_trace_exp;
-    spike_times_opt = spike_times_exp;
-    spike_V_opt = spike_V_exp;
-    n_pred_spikes = n_pred_spikes_exp;
-    pred_rate = pred_rate_exp;
+% Check for overfitting
+generalization_ratio = final_vp_holdout / final_vp_train;
+if generalization_ratio > 1.5
+    warning('Possible overfitting detected! Hold-out VP is %.1fx higher than training VP.', generalization_ratio);
+elseif generalization_ratio > 1.2
+    fprintf('⚠️  Moderate generalization gap: Hold-out VP is %.1fx training VP\n', generalization_ratio);
 else
-    spikes_opt = spikes_linexp;
-    V_pred_opt = V_pred_linexp;
-    threshold_trace_opt = threshold_trace_linexp;
-    spike_times_opt = spike_times_linexp;
-    spike_V_opt = spike_V_linexp;
-    n_pred_spikes = n_pred_spikes_linexp;
-    pred_rate = pred_rate_linexp;
+    fprintf('✅ Good generalization: Hold-out VP is %.1fx training VP\n', generalization_ratio);
 end
 
-%% === PERFORMANCE TESTING - SIMULATEFAST ONLY ===
+%% === FINAL VALIDATION ON FULL DATASET ===
+fprintf('\n=== FULL DATASET VALIDATION ===\n');
+
+% Create full model for final validation
+model_full = SpikeResponseModel( ...
+    Vm_cleaned, ...                % Full subthreshold data
+    Vm_all, ...                    % Full raw data
+    dt, ...                        % Time step
+    avg_spike, ...                 % Average spike waveform
+    tau_ref_ms, ...                % Refractory period
+    [elbow_indices_train(:); elbow_indices_holdout(:) + train_end_idx], ...  % All spike indices
+    [threshold_values_train(:); threshold_values_holdout(:)], ...  % All thresholds
+    cell_name, ...                 % Cell identifier
+    cell_type_name ...             % Cell type
+);
+
+% Run best model on full dataset
+fprintf('Running best model (%s) on full dataset...\n', best_kernel);
+[spikes_full, V_pred_full, threshold_trace_full, spike_times_full, spike_V_full] = ...
+    model_full.simulateFast(theta0_opt, kernel_opt, 'profile', false);
+
+% Calculate final metrics
+n_true_spikes_full = length(elbow_indices_train) + length(elbow_indices_holdout);
+n_pred_spikes_full = length(spike_times_full);
+true_rate_full = n_true_spikes_full / t_total;
+pred_rate_full = n_pred_spikes_full / t_total;
+rate_accuracy_full = 100 * min(pred_rate_full, true_rate_full) / max(pred_rate_full, true_rate_full);
+
+fprintf('\nFull dataset results:\n');
+fprintf('  True spikes: %d (%.2f Hz)\n', n_true_spikes_full, true_rate_full);
+fprintf('  Predicted spikes: %d (%.2f Hz)\n', n_pred_spikes_full, pred_rate_full);
+fprintf('  Rate accuracy: %.1f%%\n', rate_accuracy_full);
+
+%% === PERFORMANCE TESTING ===
 fprintf('\n=== PERFORMANCE TESTING ===\n');
 
-% Test simulateFast performance only
+% Test simulateFast performance
 n_fast_tests = 50;
 fprintf('Testing simulateFast with %d simulations...\n', n_fast_tests);
 
 tic;
 for i = 1:n_fast_tests
-    [~, ~, ~, ~, ~] = model.simulateFast(theta0_opt, kernel_opt, 'profile', false);
+    [~, ~, ~, ~, ~] = model_full.simulateFast(theta0_opt, kernel_opt, 'profile', false);
 end
 fast_time = toc;
 
@@ -373,367 +397,328 @@ avg_fast_time = 1000 * fast_time / n_fast_tests;
 
 fprintf('Performance results:\n');
 fprintf('  simulateFast: %.2f ms/simulation\n', avg_fast_time);
-fprintf('  Total time for %d simulations: %.2f seconds\n', n_fast_tests, fast_time);
 
-%% === COMPREHENSIVE VISUALIZATION FOR BOTH KERNELS ===
-fprintf('\n=== CREATING DIAGNOSTIC PLOTS FOR BOTH KERNELS ===\n');
+%% === THRESHOLD CORRELATION ANALYSIS ===
+fprintf('\n=== THRESHOLD CORRELATION ANALYSIS ===\n');
 
-% Define zoom window for detailed view - focus on middle section with good activity
-zoom_start = t_total * 0.3;  % Start at 30% of recording
-zoom_duration = min(2.0, t_total * 0.4);  % Show 2 seconds or 40% of recording, whichever is smaller
-zoom_xlim = [zoom_start, zoom_start + zoom_duration];
+% Run simulations to get predicted thresholds for both sets
+fprintf('Running simulations for threshold correlation analysis...\n');
 
-% Ensure zoom window contains some spikes for meaningful visualization
-spike_times_sec = elbow_indices * dt;
-spikes_in_window = spike_times_sec >= zoom_xlim(1) & spike_times_sec <= zoom_xlim(2);
-n_spikes_in_zoom = sum(spikes_in_window);
+% Training set simulation
+[~, ~, threshold_trace_train, ~, ~] = model.simulateFast(theta0_opt, kernel_opt, 'profile', false);
 
-% If few spikes in default window, find a better window
-if n_spikes_in_zoom < 3 && length(spike_times_sec) > 5
-    % Find a 2-second window with the most spikes
-    best_spike_count = 0;
-    best_start = zoom_xlim(1);
-    
-    for start_time = 0:0.5:(t_total-zoom_duration)
-        test_window = [start_time, start_time + zoom_duration];
-        spikes_in_test = sum(spike_times_sec >= test_window(1) & spike_times_sec <= test_window(2));
-        if spikes_in_test > best_spike_count
-            best_spike_count = spikes_in_test;
-            best_start = start_time;
-        end
-    end
-    zoom_xlim = [best_start, best_start + zoom_duration];
-    fprintf('Adjusted zoom window to [%.2f, %.2f] s with %d spikes\n', ...
-        zoom_xlim(1), zoom_xlim(2), best_spike_count);
+% Hold-out set simulation  
+[~, ~, threshold_trace_holdout_sim, ~, ~] = model_holdout.simulateFast(theta0_opt, kernel_opt, 'profile', false);
+
+% Calculate correlations
+train_true_thresholds = threshold_values_train;
+train_predicted_thresholds = threshold_trace_train(elbow_indices_train);
+train_corr = corr(train_true_thresholds(:), train_predicted_thresholds(:));
+
+holdout_true_thresholds = threshold_values_holdout;
+holdout_predicted_thresholds = threshold_trace_holdout_sim(elbow_indices_holdout);
+holdout_corr = corr(holdout_true_thresholds(:), holdout_predicted_thresholds(:));
+
+fprintf('Threshold correlations:\n');
+fprintf('  Training set: r = %.3f\n', train_corr);
+fprintf('  Hold-out set: r = %.3f\n', holdout_corr);
+fprintf('  Correlation difference: %.3f\n', holdout_corr - train_corr);
+
+%% === DURATION-NORMALIZED VP ANALYSIS ===
+fprintf('\n=== DURATION-NORMALIZED VP ANALYSIS ===\n');
+
+% Normalize VP by duration and spike count
+vp_per_second_train = final_vp_train / train_duration;
+vp_per_second_holdout = final_vp_holdout / holdout_duration_sec;
+vp_per_spike_train = final_vp_train / length(elbow_indices_train);
+vp_per_spike_holdout = final_vp_holdout / length(elbow_indices_holdout);
+
+fprintf('Normalized VP analysis:\n');
+fprintf('  Training VP/second: %.3f\n', vp_per_second_train);
+fprintf('  Hold-out VP/second: %.3f\n', vp_per_second_holdout);
+fprintf('  VP/second ratio (holdout/train): %.3f\n', vp_per_second_holdout / vp_per_second_train);
+fprintf('  Training VP/spike: %.3f\n', vp_per_spike_train);
+fprintf('  Hold-out VP/spike: %.3f\n', vp_per_spike_holdout);
+fprintf('  VP/spike ratio (holdout/train): %.3f\n', vp_per_spike_holdout / vp_per_spike_train);
+
+if vp_per_second_holdout > vp_per_second_train
+    fprintf('  → Hold-out actually performs WORSE when normalized by duration\n');
 else
-    fprintf('Using zoom window [%.2f, %.2f] s with %d spikes\n', ...
-        zoom_xlim(1), zoom_xlim(2), n_spikes_in_zoom);
+    fprintf('  → Hold-out still performs better even when normalized by duration\n');
 end
 
-%% === DIAGNOSTIC PLOTS FOR EXPONENTIAL KERNEL ===
-fprintf('\n--- Creating diagnostic plots for EXPONENTIAL kernel ---\n');
-kernel_params_exp = [A_opt_exp, tau_opt_exp];
+%% === COMPREHENSIVE VALIDATION VISUALIZATION ===
+fprintf('\n=== CREATING COMPREHENSIVE VALIDATION PLOTS ===\n');
 
-model.diagnostics(V_pred_exp, threshold_trace_exp, spikes_exp, final_vp_exp, ...
-    zoom_xlim, '', kernel_params_exp, spike_times_exp, spike_V_exp);
+figure('Position', [50, 50, 1800, 1000]);
 
-% Add kernel type to title
-sgtitle(sprintf('EXPONENTIAL Kernel Diagnostics: %s (%s) | VP=%.3f', ...
-    cell_name, cell_type_name, final_vp_exp), 'FontSize', 14, 'FontWeight', 'bold');
-
-%% === DIAGNOSTIC PLOTS FOR LINEAR RISE + EXP DECAY KERNEL ===
-fprintf('--- Creating diagnostic plots for LINEAR RISE + EXP DECAY kernel ---\n');
-kernel_params_linexp = [A_opt_linexp, T_rise_opt_linexp, tau_decay_opt_linexp];
-
-model.diagnostics(V_pred_linexp, threshold_trace_linexp, spikes_linexp, final_vp_linexp, ...
-    zoom_xlim, '', kernel_params_linexp, spike_times_linexp, spike_V_linexp);
-
-% Add kernel type to title  
-sgtitle(sprintf('LINEAR RISE + EXP DECAY Kernel Diagnostics: %s (%s) | VP=%.3f', ...
-    cell_name, cell_type_name, final_vp_linexp), 'FontSize', 14, 'FontWeight', 'bold');
-
-%% === KERNEL COMPARISON PLOT ===
-fprintf('--- Creating kernel comparison plot ---\n');
-figure('Position', [200, 200, 1400, 600]);
-
-% Plot both kernels side by side
-t_kernel = 0:dt:0.15;  % 150 ms
-
-subplot(1,3,1);
-kernel_exp_response = A_opt_exp * exp(-t_kernel / tau_opt_exp);
-plot(t_kernel*1000, kernel_exp_response, 'b-', 'LineWidth', 3);
-xlabel('Time after spike (ms)');
-ylabel('Threshold increase (mV)');
-title(sprintf('Exponential Kernel\nA=%.1f mV, τ=%.1f ms\nVP=%.3f', ...
-      A_opt_exp, tau_opt_exp*1000, final_vp_exp));
-grid on;
-
-subplot(1,3,2);
-kernel_linexp_response = (t_kernel < T_rise_opt_linexp) .* (A_opt_linexp / T_rise_opt_linexp .* t_kernel) + ...
-                        (t_kernel >= T_rise_opt_linexp) .* (A_opt_linexp * exp(-(t_kernel - T_rise_opt_linexp) / tau_decay_opt_linexp));
-plot(t_kernel*1000, kernel_linexp_response, 'r-', 'LineWidth', 3);
-xlabel('Time after spike (ms)');
-ylabel('Threshold increase (mV)');
-title(sprintf('Linear Rise + Exp Decay\nA=%.1f mV, T_{rise}=%.1f ms, τ_{decay}=%.1f ms\nVP=%.3f', ...
-      A_opt_linexp, T_rise_opt_linexp*1000, tau_decay_opt_linexp*1000, final_vp_linexp));
-grid on;
-
-subplot(1,3,3);
-plot(t_kernel*1000, kernel_exp_response, 'b-', 'LineWidth', 3); hold on;
-plot(t_kernel*1000, kernel_linexp_response, 'r-', 'LineWidth', 3);
-xlabel('Time after spike (ms)');
-ylabel('Threshold increase (mV)');
-title('Kernel Comparison');
-legend('Exponential', 'Linear + Exp', 'Location', 'best');
-grid on;
-
-% Add winner annotation
-if final_vp_exp < final_vp_linexp
-    winner_text = sprintf('Winner: Exponential\n(%.1f%% better)', improvement_pct);
-    text(0.05, 0.95, winner_text, 'Units', 'normalized', 'VerticalAlignment', 'top', ...
-         'BackgroundColor', [0.8 0.9 1], 'FontSize', 12, 'FontWeight', 'bold');
-else
-    winner_text = sprintf('Winner: Linear + Exp\n(%.1f%% better)', improvement_pct);
-    text(0.05, 0.95, winner_text, 'Units', 'normalized', 'VerticalAlignment', 'top', ...
-         'BackgroundColor', [1 0.8 0.8], 'FontSize', 12, 'FontWeight', 'bold');
+% Plot 1: Threshold correlation scatter plots
+subplot(3,4,1);
+% NEW (working):
+h1 = scatter(train_true_thresholds, train_predicted_thresholds, 30, 'filled');
+try
+    h1.MarkerFaceAlpha = 0.6;  % This is the correct property name
+catch
+    % Fallback for older MATLAB versions
 end
+hold on;
+plot([min(train_true_thresholds), max(train_true_thresholds)], ...
+     [min(train_true_thresholds), max(train_true_thresholds)], 'r--', 'LineWidth', 2);
+xlabel('True Threshold (mV)');
+ylabel('Predicted Threshold (mV)');
+title(sprintf('Training Set\nr = %.3f', train_corr));
+grid on;
 
-sgtitle(sprintf('Kernel Comparison: %s (%s)', cell_name, cell_type_name), ...
-    'FontSize', 14, 'FontWeight', 'bold');
+subplot(3,4,2);
 
-% Additional analysis plots
-figure('Position', [150, 150, 1200, 800]);
 
-% Subplot 1: Parameter sensitivity analysis
-subplot(2,3,1);
-param_sweep_ranges = {
-    linspace(theta0_opt-5, theta0_opt+5, 11),
-    linspace(A_opt*0.5, A_opt*1.5, 11),
-    linspace(tau_opt*0.5, tau_opt*1.5, 11)
-};
-param_names = {'θ₀ (mV)', 'A (mV)', 'τ (s)'};
-
-% Test sensitivity to theta0 using simulateFast
-vp_sweep = zeros(size(param_sweep_ranges{1}));
-for i = 1:length(param_sweep_ranges{1})
-    test_params = [param_sweep_ranges{1}(i), A_opt, tau_opt];
-    vp_sweep(i) = compute_fast_vp_loss(test_params, model, vp_q);
+% NEW (working):
+h1 = scatter(holdout_true_thresholds, holdout_predicted_thresholds, 30, 'filled');
+try
+    h1.MarkerFaceAlpha = 0.6;  % This is the correct property name
+catch
+    % Fallback for older MATLAB versions
 end
+hold on;
+plot([min(holdout_true_thresholds), max(holdout_true_thresholds)], ...
+     [min(holdout_true_thresholds), max(holdout_true_thresholds)], 'r--', 'LineWidth', 2);
+xlabel('True Threshold (mV)');
+ylabel('Predicted Threshold (mV)');
+title(sprintf('Hold-out Set\nr = %.3f', holdout_corr));
+grid on;
 
-plot(param_sweep_ranges{1}, vp_sweep, 'o-', 'LineWidth', 2); hold on;
-plot(theta0_opt, final_vp, 'ro', 'MarkerSize', 10, 'LineWidth', 3);
-xlabel(param_names{1});
+% Plot 3: Correlation comparison
+subplot(3,4,3);
+bar([train_corr, holdout_corr], 'FaceColor', [0.3 0.7 0.9]);
+set(gca, 'XTickLabel', {'Training', 'Hold-out'});
+ylabel('Threshold Correlation');
+title('Correlation Comparison');
+ylim([0, 1]);
+grid on;
+
+% Plot 4: VP comparison (raw)
+subplot(3,4,4);
+bar([final_vp_train, final_vp_holdout], 'FaceColor', [0.9 0.7 0.3]);
+set(gca, 'XTickLabel', {'Training', 'Hold-out'});
 ylabel('VP Distance');
-title('Sensitivity to θ₀');
+title('Raw VP Comparison');
 grid on;
 
-% Subplot 2: Threshold adaptation kernel
-subplot(2,3,2);
-t_kernel = 0:dt:0.2;  % 200 ms
-if strcmp(best_kernel, 'exponential')
-    kernel_response = A_opt_exp * exp(-t_kernel / tau_opt_exp);
-    plot(t_kernel*1000, kernel_response, 'b-', 'LineWidth', 3);
-    title(sprintf('Adaptation Kernel (Exponential)\nA=%.1f mV, τ=%.1f ms', A_opt_exp, tau_opt_exp*1000));
-else
-    kernel_response = (t_kernel < T_rise_opt_linexp) .* (A_opt_linexp / T_rise_opt_linexp .* t_kernel) + ...
-                     (t_kernel >= T_rise_opt_linexp) .* (A_opt_linexp * exp(-(t_kernel - T_rise_opt_linexp) / tau_decay_opt_linexp));
-    plot(t_kernel*1000, kernel_response, 'b-', 'LineWidth', 3);
-    title(sprintf('Adaptation Kernel (LinExp)\nA=%.1f mV, T_{rise}=%.1f ms, τ_{decay}=%.1f ms', ...
-          A_opt_linexp, T_rise_opt_linexp*1000, tau_decay_opt_linexp*1000));
-end
-xlabel('Time after spike (ms)');
-ylabel('Threshold increase (mV)');
+% Plot 5: VP per second
+subplot(3,4,5);
+bar([vp_per_second_train, vp_per_second_holdout], 'FaceColor', [0.7 0.9 0.3]);
+set(gca, 'XTickLabel', {'Training', 'Hold-out'});
+ylabel('VP per Second');
+title('Duration-Normalized VP');
 grid on;
 
-% Subplot 3: Firing rate vs threshold relationship
-subplot(2,3,3);
-if length(elbow_indices) > 3
-    % Calculate local firing rates around each spike
-    window_size = round(0.5 / dt);  % 500 ms windows
-    local_rates = [];
-    local_thresholds = [];
-    
-    for i = 1:length(elbow_indices)
-        spike_idx = elbow_indices(i);
-        win_start = max(1, spike_idx - window_size);
-        win_end = min(length(Vm_all), spike_idx + window_size);
-        
-        spikes_in_window = sum(elbow_indices >= win_start & elbow_indices <= win_end);
-        rate = spikes_in_window / (2 * window_size * dt);  % Hz
-        
-        local_rates = [local_rates, rate];
-        local_thresholds = [local_thresholds, threshold_values(i)];
-    end
-    
-    scatter(local_rates, local_thresholds, 60, 'filled');
-    xlabel('Local firing rate (Hz)');
-    ylabel('Threshold (mV)');
-    title('Rate-Threshold Relationship');
-    
-    % Fit linear relationship
-    if length(local_rates) > 2
-        p = polyfit(local_rates, local_thresholds, 1);
-        rate_range = linspace(min(local_rates), max(local_rates), 100);
-        hold on;
-        plot(rate_range, polyval(p, rate_range), 'r--', 'LineWidth', 2);
-        text(0.05, 0.95, sprintf('Slope: %.2f mV/Hz', p(1)), ...
-            'Units', 'normalized', 'VerticalAlignment', 'top');
-    end
-    grid on;
-end
-
-% Subplot 4: ISI distribution comparison
-subplot(2,3,4);
-if length(elbow_indices) > 1 && length(spike_times_opt) > 1
-    true_isis = diff(elbow_indices) * dt * 1000;  % ms
-    pred_isis = diff(find(spikes_opt)) * dt * 1000;  % ms
-    
-    edges = 0:2:50;  % 0-50 ms in 2 ms bins
-    histogram(true_isis, edges, 'FaceColor', 'b', 'FaceAlpha', 0.5); hold on;
-    histogram(pred_isis, edges, 'FaceColor', 'r', 'FaceAlpha', 0.5);
-    xlabel('ISI (ms)');
-    ylabel('Count');
-    title('ISI Distribution');
-    legend('True', 'Predicted', 'Location', 'best');
-    grid on;
-end
-
-% Subplot 5: Voltage histogram at spike times
-subplot(2,3,5);
-histogram(threshold_values, 15, 'FaceColor', 'g', 'FaceAlpha', 0.7);
-xlabel('Threshold voltage (mV)');
-ylabel('Count');
-title('Threshold Distribution');
+% Plot 6: VP per spike
+subplot(3,4,6);
+bar([vp_per_spike_train, vp_per_spike_holdout], 'FaceColor', [0.9 0.3 0.7]);
+set(gca, 'XTickLabel', {'Training', 'Hold-out'});
+ylabel('VP per Spike');
+title('Spike-Normalized VP');
 grid on;
 
-% Subplot 6: Performance summary
-subplot(2,3,6);
-perf_metrics = [true_rate, pred_rate; n_true_spikes, n_pred_spikes; final_vp, avg_fast_time];
-bar_data = perf_metrics';
-bar(bar_data);
-set(gca, 'XTickLabel', {'Rate (Hz)', 'Count', 'VP/Time(ms)'});
-ylabel('Value');
-title('Performance Summary');
-legend('True/VP', 'Pred/Fast', 'Location', 'best');
+% Plot 7: Generalization metrics
+subplot(3,4,7);
+metrics = [generalization_ratio, vp_per_second_holdout/vp_per_second_train, vp_per_spike_holdout/vp_per_spike_train];
+bar(metrics, 'FaceColor', [0.7 0.3 0.9]);
+set(gca, 'XTickLabel', {'Raw', 'Per Sec', 'Per Spike'});
+ylabel('Holdout/Training Ratio');
+title('Generalization Metrics');
+yline(1.0, 'r--', 'LineWidth', 2);
 grid on;
 
-sgtitle(sprintf('Experimental Data Analysis (simulateFast): %s (%s)', cell_name, cell_type_name), ...
+% Plot 8: Kernel comparison on both sets
+subplot(3,4,8);
+kernel_data = [final_vp_exp_train, final_vp_exp_holdout; ...
+               final_vp_linexp_train, final_vp_linexp_holdout];
+bar(kernel_data);
+set(gca, 'XTickLabel', {'Exponential', 'Linear+Exp'});
+ylabel('VP Distance');
+title('Kernel Comparison');
+legend('Training', 'Hold-out', 'Location', 'best');
+grid on;
+
+% Plot 9: Firing rate consistency
+subplot(3,4,9);
+rates = [length(elbow_indices_train)/train_duration, length(elbow_indices_holdout)/holdout_duration_sec];
+bar(rates, 'FaceColor', [0.5 0.8 0.5]);
+set(gca, 'XTickLabel', {'Training', 'Hold-out'});
+ylabel('Firing Rate (Hz)');
+title('Rate Consistency');
+grid on;
+
+% Plot 10: Threshold statistics
+subplot(3,4,10);
+thresh_stats = [mean(train_true_thresholds), std(train_true_thresholds); ...
+                mean(holdout_true_thresholds), std(holdout_true_thresholds)];
+bar(thresh_stats);
+set(gca, 'XTickLabel', {'Training', 'Hold-out'});
+ylabel('Threshold (mV)');
+title('Threshold Statistics');
+legend('Mean', 'Std', 'Location', 'best');
+grid on;
+
+% Plot 11: Model quality summary
+subplot(3,4,11);
+quality_metrics = [train_corr, holdout_corr; ...
+                   rate_accuracy_full/100, rate_accuracy_full/100; ...
+                   1-vp_per_spike_train/100, 1-vp_per_spike_holdout/100];
+bar(quality_metrics);
+set(gca, 'XTickLabel', {'Thresh Corr', 'Rate Acc', 'VP Quality'});
+ylabel('Quality Score');
+title('Model Quality');
+legend('Training', 'Hold-out', 'Location', 'best');
+ylim([0, 1]);
+grid on;
+
+% Plot 12: Performance summary text
+subplot(3,4,12);
+axis off;
+summary_text = {
+    'VALIDATION SUMMARY';
+    '';
+    sprintf('Duration: %.1fs train, %.1fs holdout', train_duration, holdout_duration_sec);
+    sprintf('Spikes: %d train, %d holdout', length(elbow_indices_train), length(elbow_indices_holdout));
+    '';
+    'THRESHOLD CORRELATION:';
+    sprintf('  Training: r=%.3f', train_corr);
+    sprintf('  Hold-out: r=%.3f', holdout_corr);
+    '';
+    'VP NORMALIZATION:';
+    sprintf('  Raw ratio: %.2f', generalization_ratio);
+    sprintf('  Per-second ratio: %.2f', vp_per_second_holdout/vp_per_second_train);
+    sprintf('  Per-spike ratio: %.2f', vp_per_spike_holdout/vp_per_spike_train);
+    '';
+    sprintf('Best kernel: %s', best_kernel);
+    sprintf('Rate accuracy: %.1f%%', rate_accuracy_full);
+};
+
+text(0.05, 0.95, summary_text, 'Units', 'normalized', 'VerticalAlignment', 'top', ...
+    'FontSize', 10, 'FontName', 'FixedWidth');
+
+sgtitle(sprintf('Comprehensive Validation Analysis: %s (%s)', cell_name, cell_type_name), ...
     'FontSize', 14, 'FontWeight', 'bold');
 
-%% === SAVE RESULTS ===
+fprintf('Comprehensive validation analysis complete!\n');
+
+%% === SAVE RESULTS WITH HOLD-OUT VALIDATION ===
 fprintf('\n=== SAVING RESULTS ===\n');
 
-% Save optimization results - both kernels
+% Save optimization results with hold-out validation
 results = struct();
 results.cell_info = struct('id', cell_name, 'type', cell_type_name);
-results.experimental = struct('dt', dt, 'duration', t_total, 'n_spikes', n_true_spikes);
-results.detection = struct('method', 'elbow_d2v', 'vm_thresh', vm_thresh, 'd2v_thresh', d2v_thresh, ...
-                          'search_back_ms', search_back_ms, 'elbow_indices', elbow_indices, ...
-                          'threshold_values', threshold_values, 'isi', isi);
+results.experimental = struct('dt', dt, 'total_duration', t_total, 'n_spikes_total', n_true_spikes_full);
 
-% Store results for both kernels
-results.optimization_exponential = struct('initial_params', init_params_exp, 'optimized_params', opt_params_exp, ...
-                                         'vp_distance', final_vp_exp, 'optimization_time', opt_time_exp, ...
-                                         'method', 'simulateFast_exponential');
-                                         
-results.optimization_linexp = struct('initial_params', init_params_linexp, 'optimized_params', opt_params_linexp, ...
-                                    'vp_distance', final_vp_linexp, 'optimization_time', opt_time_linexp, ...
-                                    'method', 'simulateFast_linear_rise_exp_decay');
+% Hold-out validation info
+results.holdout_validation = struct( ...
+    'holdout_duration_sec', holdout_duration_sec, ...
+    'holdout_percentage', holdout_percentage, ...
+    'train_duration_sec', train_duration, ...
+    'train_percentage', train_percentage, ...
+    'n_spikes_train', length(elbow_indices_train), ...
+    'n_spikes_holdout', length(elbow_indices_holdout) ...
+);
 
-% Best kernel results
-results.best_kernel = struct('type', best_kernel, 'vp_distance', final_vp, ...
-                            'improvement_percent', improvement_pct, 'kernel_params', kernel_params);
+% Model comparison results
+results.model_comparison = struct( ...
+    'exponential', struct('train_vp', final_vp_exp_train, 'holdout_vp', final_vp_exp_holdout, ...
+                         'params', opt_params_exp, 'generalization_ratio', final_vp_exp_holdout/final_vp_exp_train), ...
+    'linear_exp', struct('train_vp', final_vp_linexp_train, 'holdout_vp', final_vp_linexp_holdout, ...
+                        'params', opt_params_linexp, 'generalization_ratio', final_vp_linexp_holdout/final_vp_linexp_train), ...
+    'best_kernel', best_kernel, ...
+    'holdout_improvement_pct', holdout_improvement_pct ...
+);
 
-results.validation = struct('predicted_spikes', n_pred_spikes, 'rate_accuracy', ...
-                           100 * min(pred_rate, true_rate) / max(pred_rate, true_rate));
+results.final_model = struct('kernel_type', best_kernel, 'train_vp', final_vp_train, ...
+                            'holdout_vp', final_vp_holdout, 'params', opt_params, ...
+                            'rate_accuracy', rate_accuracy_full);
 results.performance = struct('simulateFast_time_ms', avg_fast_time, 'total_tests', n_fast_tests);
-results.model = model;  % Save the complete model object
+
+% Add new validation metrics to results
+results.threshold_correlation = struct( ...
+    'train_correlation', train_corr, ...
+    'holdout_correlation', holdout_corr, ...
+    'correlation_difference', holdout_corr - train_corr ...
+);
+
+results.normalized_vp = struct( ...
+    'train_vp_per_second', vp_per_second_train, ...
+    'holdout_vp_per_second', vp_per_second_holdout, ...
+    'vp_per_second_ratio', vp_per_second_holdout / vp_per_second_train, ...
+    'train_vp_per_spike', vp_per_spike_train, ...
+    'holdout_vp_per_spike', vp_per_spike_holdout, ...
+    'vp_per_spike_ratio', vp_per_spike_holdout / vp_per_spike_train ...
+);
 
 % Save to file
-save_filename = sprintf('spike_analysis_fast_%s_%s.mat', cell_name, datestr(now, 'yyyymmdd_HHMMSS'));
-save(save_filename, 'results', 'model', 'Vm_all', 'Vm_cleaned');
+save_filename = sprintf('spike_analysis_holdout_%s_%s.mat', cell_name, datestr(now, 'yyyymmdd_HHMMSS'));
+save(save_filename, 'results', 'model_full', 'Vm_all', 'Vm_cleaned');
 
 fprintf('Results saved to: %s\n', save_filename);
 
-%% === COMPACT SUMMARY LOG ===
-fprintf('\n' + string(repmat('=', 1, 50)) + '\n');
-fprintf('SPIKE ANALYSIS SUMMARY LOG (simulateFast)\n');
-fprintf(string(repmat('=', 1, 50)) + '\n');
+%% === COMPACT SUMMARY LOG WITH HOLD-OUT ===
+fprintf('\n' + string(repmat('=', 1, 60)) + '\n');
+fprintf('SPIKE ANALYSIS SUMMARY WITH HOLD-OUT VALIDATION\n');
+fprintf(string(repmat('=', 1, 60)) + '\n');
 
-% Create compact summary for easy copying - include both kernels
+% Create compact summary
 summary_log = sprintf([...
-    'CELL: %s (%s) | DUR: %.1fs | RATE: %.1fHz\n' ...
-    'SPIKES: %d detected | ISI: %.1f±%.1fms\n' ...
-    'DETECTION: vm_thresh=%.1f, d2v_thresh=%.1f, search_back=%.1fms\n' ...
-    'THRESHOLD_STATS: μ=%.1f±%.1fmV, range=[%.1f,%.1f]mV\n' ...
-    'EXPONENTIAL: θ₀=%.1f, A=%.1f, τ=%.1fms | VP=%.3f\n' ...
-    'LINEXP: θ₀=%.1f, A=%.1f, T_rise=%.1f, τ_decay=%.1fms | VP=%.3f\n' ...
-    'BEST_KERNEL: %s | IMPROVEMENT: %.1f%%\n' ...
+    'CELL: %s (%s) | TOTAL_DUR: %.1fs | RATE: %.1fHz\n' ...
+    'HOLDOUT: %.1fs (%.1f%%) | TRAIN: %.1fs (%.1f%%)\n' ...
+    'SPIKES: %d total (%d train, %d holdout)\n' ...
+    'DETECTION: vm_thresh=%.1f, d2v_thresh=%.1f, enhanced_v2\n' ...
+    'TRAINING_RESULTS:\n' ...
+    '  EXPONENTIAL: θ₀=%.1f, A=%.1f, τ=%.1fms | VP_train=%.3f\n' ...
+    '  LINEXP: θ₀=%.1f, A=%.1f, T_rise=%.1f, τ_decay=%.1fms | VP_train=%.3f\n' ...
+    'HOLDOUT_VALIDATION:\n' ...
+    '  EXPONENTIAL: VP_holdout=%.3f | Ratio=%.2f\n' ...
+    '  LINEXP: VP_holdout=%.3f | Ratio=%.2f\n' ...
+    'BEST_KERNEL: %s | HOLDOUT_IMPROVEMENT: %.1f%%\n' ...
+    'THRESHOLD_CORRELATION: train=%.3f, holdout=%.3f, diff=%.3f\n' ...
+    'VP_NORMALIZED: per_sec_ratio=%.2f, per_spike_ratio=%.2f\n' ...
+    'GENERALIZATION: %.2fx (raw), %.2fx (per_sec), %.2fx (per_spike)\n' ...
     'PERFORMANCE: simulateFast=%.1fms | Rate_acc=%.1f%% | Pred_spikes=%d\n' ...
-    'METHOD: simulateFast_BOTH_KERNELS | Tests=%d\n' ...
+    'METHOD: simulateFast_HOLDOUT_VALIDATION | Tests=%d\n' ...
     'SAVED: %s'], ...
-    cell_name, cell_type_name, t_total, true_rate, ...
-    n_true_spikes, mean(isi), std(isi), ...
-    vm_thresh, d2v_thresh, search_back_ms, ...
-    mean(threshold_values), std(threshold_values), min(threshold_values), max(threshold_values), ...
-    theta0_opt_exp, A_opt_exp, tau_opt_exp*1000, final_vp_exp, ...
-    theta0_opt_linexp, A_opt_linexp, T_rise_opt_linexp*1000, tau_decay_opt_linexp*1000, final_vp_linexp, ...
-    best_kernel, improvement_pct, ...
-    avg_fast_time, 100 * min(pred_rate, true_rate) / max(pred_rate, true_rate), n_pred_spikes, ...
+    cell_name, cell_type_name, t_total, true_rate_full, ...
+    holdout_duration_sec, holdout_percentage, train_duration, train_percentage, ...
+    n_true_spikes_full, length(elbow_indices_train), length(elbow_indices_holdout), ...
+    vm_thresh, d2v_thresh, ...
+    theta0_opt_exp, A_opt_exp, tau_opt_exp*1000, final_vp_exp_train, ...
+    theta0_opt_linexp, A_opt_linexp, T_rise_opt_linexp*1000, tau_decay_opt_linexp*1000, final_vp_linexp_train, ...
+    final_vp_exp_holdout, final_vp_exp_holdout/final_vp_exp_train, ...
+    final_vp_linexp_holdout, final_vp_linexp_holdout/final_vp_linexp_train, ...
+    best_kernel, holdout_improvement_pct, ...
+    train_corr, holdout_corr, holdout_corr - train_corr, ...
+    vp_per_second_holdout / vp_per_second_train, vp_per_spike_holdout / vp_per_spike_train, ...
+    generalization_ratio, vp_per_second_holdout / vp_per_second_train, vp_per_spike_holdout / vp_per_spike_train, ...
+    avg_fast_time, rate_accuracy_full, n_pred_spikes_full, ...
     n_fast_tests, save_filename);
 
 fprintf('%s\n', summary_log);
-fprintf(string(repmat('=', 1, 50)) + '\n');
+fprintf(string(repmat('=', 1, 60)) + '\n');
 
 %% === FINAL SUMMARY ===
-fprintf('\n=== ANALYSIS COMPLETE (simulateFast + KERNEL COMPARISON) ===\n');
-fprintf('✅ Successfully analyzed experimental data for %s\n', cell_name);
-fprintf('📊 Detected %d spikes (%.2f Hz)\n', n_true_spikes, true_rate);
-fprintf('\n🔬 KERNEL COMPARISON RESULTS:\n');
-fprintf('   Exponential kernel VP: %.3f\n', final_vp_exp);
-fprintf('   Linear rise + exp decay VP: %.3f\n', final_vp_linexp);
-fprintf('   🏆 Best kernel: %s (%.1f%% improvement)\n', best_kernel, improvement_pct);
-
-if strcmp(best_kernel, 'exponential')
-    fprintf('\n🎯 Best model (Exponential):\n');
-    fprintf('   • Baseline threshold (θ₀): %.1f mV\n', theta0_opt_exp);
-    fprintf('   • Adaptation amplitude (A): %.1f mV\n', A_opt_exp);
-    fprintf('   • Adaptation time constant (τ): %.1f ms\n', tau_opt_exp*1000);
-else
-    fprintf('\n🎯 Best model (Linear rise + exp decay):\n');
-    fprintf('   • Baseline threshold (θ₀): %.1f mV\n', theta0_opt_linexp);
-    fprintf('   • Adaptation amplitude (A): %.1f mV\n', A_opt_linexp);
-    fprintf('   • Rise time constant (T_rise): %.1f ms\n', T_rise_opt_linexp*1000);
-    fprintf('   • Decay time constant (τ_decay): %.1f ms\n', tau_decay_opt_linexp*1000);
-end
-
-fprintf('⚡ Performance: simulateFast = %.1f ms/simulation\n', avg_fast_time);
-fprintf('🔬 Model quality: VP distance = %.3f\n', final_vp);
-fprintf('💾 Results saved to: %s\n', save_filename);
-fprintf('🚀 Used simulateFast ONLY for all simulations\n');
-fprintf('🔄 Compared both exponential and linear rise + exp decay kernels\n');
+fprintf('\n=== ANALYSIS COMPLETE WITH HOLD-OUT VALIDATION ===\n');
+fprintf('Successfully analyzed experimental data with proper validation\n');
+fprintf('Total spikes: %d (%.2f Hz over %.2fs)\n', n_true_spikes_full, true_rate_full, t_total);
+fprintf('Hold-out validation: %.1fs (%.1f%%) for unbiased evaluation\n', holdout_duration_sec, holdout_percentage);
+fprintf('\nBest model: %s\n', best_kernel);
+fprintf('   Training VP: %.3f\n', final_vp_train);
+fprintf('   Hold-out VP: %.3f\n', final_vp_holdout);
+fprintf('   Generalization: %.2fx\n', generalization_ratio);
+fprintf('   Threshold correlation: %.3f (train), %.3f (holdout)\n', train_corr, holdout_corr);
+fprintf('Performance: %.1f ms/simulation\n', avg_fast_time);
+fprintf('Results: %s\n', save_filename);
 
 % Copy to clipboard
 clipboard('copy', summary_log);
-fprintf('📋 Summary copied to clipboard!\n');
-fprintf('🔄 Paste this summary to continue analysis discussions.\n');
+fprintf('Summary copied to clipboard!\n');
 
-
-%% === FAST LOSS FUNCTIONS FOR BOTH KERNELS ===
-function loss = compute_fast_vp_loss(params, model, q)
-    % Fast Victor-Purpura loss using simulateFast ONLY - GENERIC (backward compatibility)
-    % This is for cases where we need a simple exponential kernel function
-    
-    theta0 = params(1);
-    A = params(2);
-    tau = params(3);
-    
-    % Define exponential kernel
-    kernel_fn = @(t) A * exp(-t / tau);
-    
-    % Use simulateFast ONLY for speed
-    try
-        [~, ~, ~, spike_times] = model.simulateFast(theta0, kernel_fn, 'profile', false);
-        
-        % Get true spike times
-        true_spike_times = model.elbow_indices * model.dt;
-        
-        % Calculate Victor-Purpura distance
-        loss = spkd_c(spike_times, true_spike_times, ...
-            length(spike_times), length(true_spike_times), q);
-        
-        % Optional: Print progress (comment out for silent optimization)
-        fprintf('GENERIC: θ₀=%.1f, A=%.1f, τ=%.1f → VP=%.3f | spikes=%d vs %d\n', ...
-            theta0, A, tau*1000, loss, length(spike_times), length(true_spike_times));
-            
-    catch ME
-        % Penalize failed simulations heavily
-        loss = 1000;
-        fprintf('GENERIC failed: θ₀=%.1f, A=%.1f, τ=%.1f → VP=1000 (penalty)\n', ...
-            theta0, A, tau*1000);
-    end
-end
-
+%% === LOSS FUNCTIONS FOR HOLD-OUT VALIDATION ===
 function loss = compute_fast_vp_loss_exponential(params, model, q)
     % Fast Victor-Purpura loss using simulateFast ONLY - EXPONENTIAL kernel
     
@@ -756,14 +741,14 @@ function loss = compute_fast_vp_loss_exponential(params, model, q)
             length(spike_times), length(true_spike_times), q);
         
         % Optional: Print progress (comment out for silent optimization)
-        fprintf('EXP: θ₀=%.1f, A=%.1f, τ=%.1f → VP=%.3f | spikes=%d vs %d\n', ...
-            theta0, A, tau*1000, loss, length(spike_times), length(true_spike_times));
+        % fprintf('EXP: θ₀=%.1f, A=%.1f, τ=%.1f → VP=%.3f | spikes=%d vs %d\n', ...
+        %     theta0, A, tau*1000, loss, length(spike_times), length(true_spike_times));
             
     catch ME
         % Penalize failed simulations heavily
         loss = 1000;
-        fprintf('EXP failed: θ₀=%.1f, A=%.1f, τ=%.1f → VP=1000 (penalty)\n', ...
-            theta0, A, tau*1000);
+        % fprintf('EXP failed: θ₀=%.1f, A=%.1f, τ=%.1f → VP=1000 (penalty)\n', ...
+        %     theta0, A, tau*1000);
     end
 end
 
@@ -775,7 +760,7 @@ function loss = compute_fast_vp_loss_linexp(params, model, q)
     T_rise = params(3);
     tau_decay = params(4);
     
-    % Define linear rise + exponential decay kernel - CORRECTED piecewise function
+    % Define linear rise + exponential decay kernel
     kernel_fn = @(t) (t < T_rise) .* (A / T_rise .* t) + ...
                      (t >= T_rise) .* (A * exp(-(t - T_rise) / tau_decay));
     
@@ -791,13 +776,13 @@ function loss = compute_fast_vp_loss_linexp(params, model, q)
             length(spike_times), length(true_spike_times), q);
         
         % Optional: Print progress (comment out for silent optimization)
-        fprintf('LINEXP: θ₀=%.1f, A=%.1f, T_rise=%.1f, τ_decay=%.1f → VP=%.3f | spikes=%d vs %d\n', ...
-            theta0, A, T_rise*1000, tau_decay*1000, loss, length(spike_times), length(true_spike_times));
+        % fprintf('LINEXP: θ₀=%.1f, A=%.1f, T_rise=%.1f, τ_decay=%.1f → VP=%.3f | spikes=%d vs %d\n', ...
+        %     theta0, A, T_rise*1000, tau_decay*1000, loss, length(spike_times), length(true_spike_times));
             
     catch ME
         % Penalize failed simulations heavily
         loss = 1000;
-        fprintf('LINEXP failed: θ₀=%.1f, A=%.1f, T_rise=%.1f, τ_decay=%.1f → VP=1000 (penalty)\n', ...
-            theta0, A, T_rise*1000, tau_decay*1000);
+        % fprintf('LINEXP failed: θ₀=%.1f, A=%.1f, T_rise=%.1f, τ_decay=%.1f → VP=1000 (penalty)\n', ...
+        %     theta0, A, T_rise*1000, tau_decay*1000);
     end
 end
