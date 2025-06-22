@@ -15,6 +15,10 @@ classdef SpikeResponseModel<handle
         cell_type           % Cell type label
     end
 
+
+
+
+
     methods
         function obj = SpikeResponseModel(Vm, Vm_recorded, dt, avg_spike, tau_ref_ms, elbow_indices, threshold_values, cell_id, cell_type)
             % Constructor
@@ -417,195 +421,195 @@ classdef SpikeResponseModel<handle
 
         %%new code
         function [spikes, V_pred_full, threshold_trace, spike_times_sec, spike_V_values] = simulateFast(obj, theta0, kernel_fn, varargin)
-% SIMULATEFAST - High-performance vectorized spike simulation
-%
-% This method provides 10-50x speedup over the original simulate2() method
-% through aggressive vectorization, pre-computation, and optimized memory access
-%
-% USAGE:
-%   [spikes, V_pred, theta, spike_times, spike_V] = obj.simulateFast(theta0, kernel_fn)
-%   [spikes, V_pred, theta, spike_times, spike_V] = obj.simulateFast(theta0, kernel_fn, 'method', 'vectorized')
-%
-% PARAMETERS:
-%   theta0    - Baseline threshold (mV)
-%   kernel_fn - Function handle for adaptation kernel: @(t) A*exp(-t/tau)
-%   
-% OPTIONS:
-%   'method'     - 'vectorized' (default), 'chunked', or 'hybrid'
-%   'profile'    - Show performance profiling (default: false)
+            % SIMULATEFAST - High-performance vectorized spike simulation
+            %
+            % This method provides 10-50x speedup over the original simulate2() method
+            % through aggressive vectorization, pre-computation, and optimized memory access
+            %
+            % USAGE:
+            %   [spikes, V_pred, theta, spike_times, spike_V] = obj.simulateFast(theta0, kernel_fn)
+            %   [spikes, V_pred, theta, spike_times, spike_V] = obj.simulateFast(theta0, kernel_fn, 'method', 'vectorized')
+            %
+            % PARAMETERS:
+            %   theta0    - Baseline threshold (mV)
+            %   kernel_fn - Function handle for adaptation kernel: @(t) A*exp(-t/tau)
+            %
+            % OPTIONS:
+            %   'method'     - 'vectorized' (default), 'chunked', or 'hybrid'
+            %   'profile'    - Show performance profiling (default: false)
 
-% Parse optional arguments
-p = inputParser;
-addParameter(p, 'method', 'vectorized', @(x) any(validatestring(x, {'vectorized', 'chunked', 'hybrid'})));
-addParameter(p, 'profile', false, @islogical);
-parse(p, varargin{:});
+            % Parse optional arguments
+            p = inputParser;
+            addParameter(p, 'method', 'vectorized', @(x) any(validatestring(x, {'vectorized', 'chunked', 'hybrid'})));
+            addParameter(p, 'profile', false, @islogical);
+            parse(p, varargin{:});
 
-method = p.Results.method;
-show_profile = p.Results.profile;
+            method = p.Results.method;
+            show_profile = p.Results.profile;
 
-if show_profile
-    fprintf('simulateFast: Using %s method\n', method);
-    total_tic = tic;
-end
-
-% Extract object properties for speed
-Vm = obj.Vm;
-dt = obj.dt;
-tau_ref_ms = obj.tau_ref_ms;
-avg_spike = obj.avg_spike;
-N = length(Vm);
-
-% Pre-compute constants
-tau_ref_pts = round(tau_ref_ms / 1000 / dt);
-spike_len = length(avg_spike);
-avg_spike_corrected = avg_spike - avg_spike(1);
-
-% Choose simulation method based on data size and user preference
-if strcmp(method, 'hybrid')
-    % Auto-select best method based on data size
-    if N <= 2000000  % 2M samples
-        method = 'vectorized';
-    else
-        method = 'chunked';
-    end
-    if show_profile
-        fprintf('  Hybrid auto-selected: %s (N=%d)\n', method, N);
-    end
-end
-
-% Pre-allocate output arrays
-spikes = false(N, 1);
-V_pred_full = Vm;  % Start with original voltage
-threshold_trace = theta0 * ones(N, 1);
-
-% CRITICAL OPTIMIZATION: Pre-compute kernel for limited duration only
-% This is the key performance improvement - don't update entire future trace
-max_kernel_duration = 0.1;  % 100ms max (exponential kernels decay to ~0 by then)
-max_kernel_samples = round(max_kernel_duration / dt);
-if max_kernel_samples > 0
-    kernel_times = (1:max_kernel_samples) * dt;
-    kernel_values_precomputed = kernel_fn(kernel_times);
-    % Ensure it's a row vector for efficient indexing
-    if size(kernel_values_precomputed, 1) > 1 && size(kernel_values_precomputed, 2) == 1
-        kernel_values_precomputed = kernel_values_precomputed';
-    end
-else
-    kernel_values_precomputed = [];
-end
-
-if show_profile
-    fprintf('    Pre-computed kernel: %d samples (%.1f ms) - LIMITED DURATION\n', max_kernel_samples, max_kernel_duration*1000);
-    method_tic = tic;
-end
-
-% Main simulation loop - HIGHLY OPTIMIZED
-predicted_spike_indices = [];
-t = 2;
-next_allowed_spike = 1;
-
-while t <= N
-    % Skip if in refractory period
-    if t < next_allowed_spike
-        t = t + 1;
-        continue;
-    end
-    
-    % Check for threshold crossing
-    if V_pred_full(t) >= threshold_trace(t)
-        spikes(t) = true;
-        predicted_spike_indices(end+1) = t;
-        
-        % Inject spike waveform - using exact same logic as simulate2
-        eta_start = t;
-        eta_end = min(t + spike_len - 1, N);
-        eta_len = eta_end - eta_start + 1;
-        target_indices = eta_start:eta_end;
-        
-        % Extract source data and handle dimensions exactly like simulate2
-        source_data = avg_spike_corrected(1:eta_len);
-        
-        % For spike injection - match original simulate2 exactly:
-        if size(source_data, 2) > 1 && size(source_data, 1) == 1
-            source_data = source_data'; % Convert column to row
             if show_profile
-                fprintf('Warning: Converting column vector avg_spike to row vector\n');
+                fprintf('simulateFast: Using %s method\n', method);
+                total_tic = tic;
             end
-        end
-        
-        % Perform injection - EXACT same as simulate2
-        %keyboard
-        V_pred_full(target_indices) = V_pred_full(target_indices) + source_data;
-        
-        % OPTIMIZED threshold update - use pre-computed kernel with limited range
-        if ~isempty(kernel_values_precomputed)
-            % Calculate update range - limited to pre-computed kernel duration
-            update_end_idx = min(t + max_kernel_samples, N);
-            update_indices = (t+1):update_end_idx;
-            update_length = length(update_indices);
-            
-            if update_length > 0
-                % Use pre-computed kernel values (much faster than calling kernel_fn)
-                kernel_segment = kernel_values_precomputed(1:update_length);
-                
-                % Ensure dimensions match exactly
-                threshold_segment = threshold_trace(update_indices);
-                
-                % Debug dimension check (remove after fixing)
-                if length(threshold_segment) ~= length(kernel_segment)
-                    fprintf('DEBUG: threshold_segment length=%d, kernel_segment length=%d\n', ...
-                        length(threshold_segment), length(kernel_segment));
-                    % Force same length by taking minimum
-                    min_len = min(length(threshold_segment), length(kernel_segment));
-                    threshold_segment = threshold_segment(1:min_len);
-                    kernel_segment = kernel_segment(1:min_len);
-                    update_indices = update_indices(1:min_len);
+
+            % Extract object properties for speed
+            Vm = obj.Vm;
+            dt = obj.dt;
+            tau_ref_ms = obj.tau_ref_ms;
+            avg_spike = obj.avg_spike;
+            N = length(Vm);
+
+            % Pre-compute constants
+            tau_ref_pts = round(tau_ref_ms / 1000 / dt);
+            spike_len = length(avg_spike);
+            avg_spike_corrected = avg_spike - avg_spike(1);
+
+            % Choose simulation method based on data size and user preference
+            if strcmp(method, 'hybrid')
+                % Auto-select best method based on data size
+                if N <= 2000000  % 2M samples
+                    method = 'vectorized';
+                else
+                    method = 'chunked';
                 end
-                
-                % Ensure both are same orientation (row or column)
-                if size(threshold_segment, 1) ~= size(kernel_segment, 1) || ...
-                   size(threshold_segment, 2) ~= size(kernel_segment, 2)
-                    % Make both column vectors
-                    threshold_segment = threshold_segment(:);
-                    kernel_segment = kernel_segment(:);
+                if show_profile
+                    fprintf('  Hybrid auto-selected: %s (N=%d)\n', method, N);
                 end
-                
-                % Perform the update
-                threshold_trace(update_indices) = threshold_segment + kernel_segment;
             end
+
+            % Pre-allocate output arrays
+            spikes = false(N, 1);
+            V_pred_full = Vm;  % Start with original voltage
+            threshold_trace = theta0 * ones(N, 1);
+
+            % CRITICAL OPTIMIZATION: Pre-compute kernel for limited duration only
+            % This is the key performance improvement - don't update entire future trace
+            max_kernel_duration = 0.1;  % 100ms max (exponential kernels decay to ~0 by then)
+            max_kernel_samples = round(max_kernel_duration / dt);
+            if max_kernel_samples > 0
+                kernel_times = (1:max_kernel_samples) * dt;
+                kernel_values_precomputed = kernel_fn(kernel_times);
+                % Ensure it's a row vector for efficient indexing
+                if size(kernel_values_precomputed, 1) > 1 && size(kernel_values_precomputed, 2) == 1
+                    kernel_values_precomputed = kernel_values_precomputed';
+                end
+            else
+                kernel_values_precomputed = [];
+            end
+
+            if show_profile
+                fprintf('    Pre-computed kernel: %d samples (%.1f ms) - LIMITED DURATION\n', max_kernel_samples, max_kernel_duration*1000);
+                method_tic = tic;
+            end
+
+            % Main simulation loop - HIGHLY OPTIMIZED
+            predicted_spike_indices = [];
+            t = 2;
+            next_allowed_spike = 1;
+
+            while t <= N
+                % Skip if in refractory period
+                if t < next_allowed_spike
+                    t = t + 1;
+                    continue;
+                end
+
+                % Check for threshold crossing
+                if V_pred_full(t) >= threshold_trace(t)
+                    spikes(t) = true;
+                    predicted_spike_indices(end+1) = t;
+
+                    % Inject spike waveform - using exact same logic as simulate2
+                    eta_start = t;
+                    eta_end = min(t + spike_len - 1, N);
+                    eta_len = eta_end - eta_start + 1;
+                    target_indices = eta_start:eta_end;
+
+                    % Extract source data and handle dimensions exactly like simulate2
+                    source_data = avg_spike_corrected(1:eta_len);
+
+                    % For spike injection - match original simulate2 exactly:
+                    if size(source_data, 2) > 1 && size(source_data, 1) == 1
+                        source_data = source_data'; % Convert column to row
+                        if show_profile
+                            fprintf('Warning: Converting column vector avg_spike to row vector\n');
+                        end
+                    end
+
+                    % Perform injection - EXACT same as simulate2
+                    %keyboard
+                    V_pred_full(target_indices) = V_pred_full(target_indices) + source_data;
+
+                    % OPTIMIZED threshold update - use pre-computed kernel with limited range
+                    if ~isempty(kernel_values_precomputed)
+                        % Calculate update range - limited to pre-computed kernel duration
+                        update_end_idx = min(t + max_kernel_samples, N);
+                        update_indices = (t+1):update_end_idx;
+                        update_length = length(update_indices);
+
+                        if update_length > 0
+                            % Use pre-computed kernel values (much faster than calling kernel_fn)
+                            kernel_segment = kernel_values_precomputed(1:update_length);
+
+                            % Ensure dimensions match exactly
+                            threshold_segment = threshold_trace(update_indices);
+
+                            % Debug dimension check (remove after fixing)
+                            if length(threshold_segment) ~= length(kernel_segment)
+                                fprintf('DEBUG: threshold_segment length=%d, kernel_segment length=%d\n', ...
+                                    length(threshold_segment), length(kernel_segment));
+                                % Force same length by taking minimum
+                                min_len = min(length(threshold_segment), length(kernel_segment));
+                                threshold_segment = threshold_segment(1:min_len);
+                                kernel_segment = kernel_segment(1:min_len);
+                                update_indices = update_indices(1:min_len);
+                            end
+
+                            % Ensure both are same orientation (row or column)
+                            if size(threshold_segment, 1) ~= size(kernel_segment, 1) || ...
+                                    size(threshold_segment, 2) ~= size(kernel_segment, 2)
+                                % Make both column vectors
+                                threshold_segment = threshold_segment(:);
+                                kernel_segment = kernel_segment(:);
+                            end
+
+                            % Perform the update
+                            threshold_trace(update_indices) = threshold_segment + kernel_segment;
+                        end
+                    end
+
+                    % Set refractory period
+                    next_allowed_spike = t + tau_ref_pts + 1;
+                    t = next_allowed_spike;
+                else
+                    t = t + 1;
+                end
+            end
+
+            if show_profile
+                sim_time = toc(method_tic);
+                fprintf('    Simulation time: %.3f s\n', sim_time);
+                fprintf('    Spikes generated: %d\n', length(predicted_spike_indices));
+                fprintf('    Performance: %.0f samples/second\n', N/sim_time);
+            end
+
+            % Generate output
+            spike_times_sec = predicted_spike_indices * dt;
+            if ~isempty(predicted_spike_indices)
+                spike_V_values = V_pred_full(predicted_spike_indices);
+            else
+                spike_V_values = [];
+            end
+
+            if show_profile
+                total_time = toc(total_tic);
+                fprintf('simulateFast completed in %.2f seconds\n', total_time);
+                fprintf('Generated %d spikes (%.2f Hz)\n', sum(spikes), sum(spikes)/((N-1)*dt));
+                expected_original_time = total_time * 20;  % Conservative estimate
+                fprintf('Estimated speedup vs simulate2: %.1fx\n', expected_original_time/total_time);
+            end
+
         end
-        
-        % Set refractory period
-        next_allowed_spike = t + tau_ref_pts + 1;
-        t = next_allowed_spike;
-    else
-        t = t + 1;
-    end
-end
-
-if show_profile
-    sim_time = toc(method_tic);
-    fprintf('    Simulation time: %.3f s\n', sim_time);
-    fprintf('    Spikes generated: %d\n', length(predicted_spike_indices));
-    fprintf('    Performance: %.0f samples/second\n', N/sim_time);
-end
-
-% Generate output
-spike_times_sec = predicted_spike_indices * dt;
-if ~isempty(predicted_spike_indices)
-    spike_V_values = V_pred_full(predicted_spike_indices);
-else
-    spike_V_values = [];
-end
-
-if show_profile
-    total_time = toc(total_tic);
-    fprintf('simulateFast completed in %.2f seconds\n', total_time);
-    fprintf('Generated %d spikes (%.2f Hz)\n', sum(spikes), sum(spikes)/((N-1)*dt));
-    expected_original_time = total_time * 20;  % Conservative estimate
-    fprintf('Estimated speedup vs simulate2: %.1fx\n', expected_original_time/total_time);
-end
-
-end
         function [spikes, V_pred_full, threshold_trace, spike_times_sec, spike_V_values] = ...
                 simulate_vectorized(Vm, theta0, kernel_fn, dt, tau_ref_pts, spike_len, avg_spike_corrected, N, show_profile)
             % VECTORIZED METHOD - Fastest for medium-sized simulations
