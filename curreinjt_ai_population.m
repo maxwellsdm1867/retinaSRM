@@ -2837,9 +2837,10 @@ for cell_idx = 1:length(gui_data.cell_names)
 end
 gui_data.save_path = '/Users/maxwellsdm/Library/CloudStorage/GoogleDrive-maxwellsdm1867@gmail.com/.shortcut-targets-by-id/1CbZnfugdi-p4jM3fe7t-NyGk5v2ZcPdk/ParasolCenterSurround/figures/ScienceJuiceFactory/currinjt/overview/RGC';
 fprintf('\nGUI data container ready. Use createSpikeInitiationGUI(gui_data) to launch GUI.\n');
-fourFactorGuiSeparated(gui_data);
-fourFactorGuiSeparated2(gui_data);
-
+% fourFactorGuiSeparated(gui_data);
+% fourFactorGuiSeparated2(gui_data);
+gui_data.cleanSpikeVis = false;
+fourFactorGuiSeparated3(gui_data);
 %% === SRM LOSS FUNCTIONS ===
 % These functions are used by the optimization routines above
 
